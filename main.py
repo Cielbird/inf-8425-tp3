@@ -5,11 +5,11 @@ from gnss import ModuleGNSS;
 from imu import ModuleIMU;
 from gnss import ModuleGNSS
 from mcu import Microcontroleur
-from util import Vector3, plot_path, save_csv;
+from util import Vector3, plot_mcu_usage, plot_path, save_csv;
 
 class System:
     def __init__(self):
-        self.drone = Drone()
+        self.drone = Drone(vent=Vector3(0.1, 0.05, 0.001))
         self.gnss = ModuleGNSS(self.drone)
         self.imu = ModuleIMU(self.drone)
         self.mcu = Microcontroleur(self.gnss, self.imu, self.drone)
@@ -37,7 +37,7 @@ def main():
     system = System()
 
     # en secondes
-    duration = 2500.0
+    duration = 60.0
     elapsed = 0.0
     t_log: list[float] = []
     pos_log: list[Vector3] = []
@@ -54,6 +54,15 @@ def main():
     save_csv(csv_path, t_log, pos_log)
     print(f"Simulation terminée, résultats dans: {csv_path}")
 
-    plot_path(t_log, pos_log, system.mcu.navigation.flight_plan)
+    mcu = system.mcu
+    plot_mcu_usage(
+        {
+            "Navigation": mcu.navigation.exec_log,
+            "Contrôle moteurs": mcu.controle_moteurs.exec_log,
+        },
+        mcu.navigation.period,
+    )
+    # plot_path appelle plt.show(), qui affiche aussi la figure du MCU
+    plot_path(t_log, pos_log, mcu.navigation.flight_plan)
 
 main()

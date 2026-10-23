@@ -4,19 +4,83 @@ from imu import ModuleIMU
 from util import PID3, Vector3
 
 
-class NavigationTask:
+class Task:
     """
-    5Hz:
+    Tâche périodique de l'RTOS.
+    waiting -> (activation) -> ready -> (le MCU lui donne le CPU) -> calculating -> waiting
+    """
+
+    def __init__(self, period: float, processing_dt: float):
+        self.period = period
+        # read and writing times are negligible
+        self.processing_dt = processing_dt # calculating time in seconds
+        self.status = "waiting" # in {"waiting", "ready", "calculating"}
+        self.next_release = 0.0 # prochaine activation périodique
+        self.start_t = 0.0 # début du calcul en cours
+        self.exec_log: list[tuple[float, float]] = [] # (début, durée) de chaque calcul
+
+    def next_event_t(self) -> float:
+        """
+        Get the time (seconds) of the next event
+        """
+        match self.status:
+            case "waiting":
+                return self.next_release
+            case "ready":
+                # attend que le MCU lui donne le CPU, pas d'événement propre
+                return float("inf")
+            case "calculating":
+                return self.start_t + self.processing_dt
+            case _:
+                raise TypeError("Invalid status")
+
+    def start(self, t: float):
+        """
+        Le MCU donne le CPU à la tâche
+        """
+        assert self.status == "ready"
+        self.start_t = t
+        self.status = "calculating"
+
+    def step(self):
+        """
+        Run sim until next event
+        """
+        t = self.next_event_t()
+        match self.status:
+            case "waiting":
+                self.next_release += self.period
+                self.status = "ready"
+
+            case "calculating":
+                self.exec_log.append((self.start_t, t - self.start_t))
+                self.compute()
+                if self.next_release <= t:
+                    # échéance manquée: déjà réactivée pendant le calcul
+                    self.next_release += self.period
+                    self.status = "ready"
+                else:
+                    self.status = "waiting"
+
+            case _:
+                raise TypeError("Invalid status")
+
+    def compute(self):
+        """
+        Lecture des entrées, calcul et écriture des sorties, à la fin du calcul
+        """
+        raise NotImplementedError
+
+
+class NavigationTask(Task):
+    """
+    20Hz:
     Read from GNSS module with UART, calculate necessary velocity, then write value to shared memory
     """
 
     def __init__(self, gnss: ModuleGNSS):
+        super().__init__(period=0.05, processing_dt=0.005) # 20Hz
         self.gnss = gnss
-        self.period = 0.05 # 5Hz frequency
-        # read and writing times are negligible
-        self.processing_dt = 0.005 # calculating time in seconds
-        self.status = "waiting" # in {"waiting", "calculating"}
-        self.elapsed = 0.0
 
         # task variables
         self.position = Vector3(0.0, 0.0, 0.0) # latitude, longitude, altitude
@@ -25,131 +89,85 @@ class NavigationTask:
         self.next_checkpoint_idx = 1
         self.flight_plan = [
             Vector3(0.0, 0.0, 0.0),
+            Vector3(0.0, 20.0, 10.0),
+            Vector3(30.0, -20.0, 10.0),
             Vector3(30.0, 0.0, 0.0),
-            Vector3(0.0, 30.0, 0.0),
-            Vector3(-30.0, 0.0, 0.0),
-            Vector3(0.0, -30.0, 0.0),
-            Vector3(0.0, 0.0, 0.0),
         ]
+        self.pid = PID3(0.4, 0.001, 0.0, self.period, -10, 10)
 
-
-    def next_event_t(self) -> float:
-        """
-        Get the time (seconds) until the next event
-        """
-        match self.status:
-            case "waiting":
-                return self.elapsed + self.period - self.processing_dt
-            case "calculating":
-                return self.elapsed + self.processing_dt
-            case _:
-                raise TypeError("Invalid status")
-                
-    def step(self):
-        """
-        Run sim until next event
-        """
-        next_t = self.next_event_t()
-        match self.status:
-            case "waiting":
-                # wait until next calc
-                self.elapsed = next_t
-
-                self.status = "calculating"
-
-            case "calculating":
-                # read from GNSS
-                self.position = self.gnss.get_position()
-                # calculation time
-                self.elapsed = next_t
-                # write to shared mem
-                self.velocity = self.calculate_vel()
-                self.status = "waiting"
-
-            case _:
-                raise TypeError("Invalid status")
+    def compute(self):
+        # read from GNSS
+        self.position = self.gnss.get_position()
+        # write to shared mem
+        self.velocity = self.calculate_vel()
 
     def calculate_vel(self) -> Vector3:
-        err = self.flight_plan[self.next_checkpoint_idx] - self.gnss.get_position()
-        if err.magnitude() < 0.1:
+        target = self.flight_plan[self.next_checkpoint_idx]
+        if (target - self.position).magnitude() < 0.1:
             if self.next_checkpoint_idx < len(self.flight_plan) - 1:
                 self.next_checkpoint_idx += 1
-        p = 0.0005
-        return err / self.period * p
+        return self.pid(self.position, target)
 
 
-class ControleMoteursTask:
+class ControleMoteursTask(Task):
+    """
+    20Hz:
+    Read the navigation velocity from shared memory and the IMU, then command the motors
+    """
+
     def __init__(self, drone: Drone, imu: ModuleIMU, nav_task: NavigationTask):
+        super().__init__(period=0.05, processing_dt=0.005) # 20Hz
         self.drone = drone
         self.imu = imu
         self.nav_task = nav_task
-        self.period = 0.05 # 5Hz frequency
-        # read and writing times are negligible
-        self.processing_dt = 0.005 # calculating time in seconds
-        self.status = "waiting" # in {"waiting", "calculating"}
-        self.elapsed = 0.0
 
         # task variables
         self.vitesse_imu = Vector3(0.0, 0.0, 0.0) # intégrateur après le capteur IMU, avant PID
-        self.pid = PID3(0.05, 0.0, 0.0, self.period, -10, 10)
+        self.pid = PID3(1.0, 0.2, 0.0, self.period, -10, 10)
 
+    def compute(self):
+        # read from shared mem
+        vel = self.nav_task.velocity
 
-    def next_event_t(self) -> float:
-        """
-        Get the time (seconds) until the next event
-        """
-        match self.status:
-            case "waiting":
-                return self.elapsed + self.period - self.processing_dt
-            case "calculating":
-                return self.elapsed + self.processing_dt
-            case _: raise TypeError("invalid control moteurs task state")
-                
-    def step(self):
-        """
-        Run sim until next event
-        """
-        next_t = self.next_event_t()
-        match self.status:
-            case "waiting":
-                # wait until next calc
-                self.elapsed = next_t
-                self.status = "calculating"
+        accel_imu = self.imu.get_accel()
+        self.vitesse_imu += accel_imu * self.period
+        accel = self.pid(self.vitesse_imu, vel)
 
-            case "calculating":
-                # read from GNSS
-                vel = self.nav_task.velocity
+        # write to motors
+        self.drone.set_accel(accel)
 
-                accel_imu = self.imu.get_accel()
-                self.vitesse_imu += accel_imu * self.period
-                accel = self.pid(self.vitesse_imu, vel)
-
-                # calculation time
-                self.elapsed = next_t
-                # write to shared mem
-                self.drone.set_accel(accel)
-                self.status = "waiting"
-                
-            case _: raise TypeError("invalid control moteurs task state")
 
 class Microcontroleur:
     """
-    Microcontrôleur et sa plateforme RTOS, avec un producteur et un consommateur
+    Microcontrôleur monocœur et sa plateforme RTOS, avec un producteur et un consommateur.
+    Une seule tâche s'exécute à la fois, sans préemption.
     """
     navigation: NavigationTask
     controle_moteurs: ControleMoteursTask
-    
+
     def __init__(self, gnss: ModuleGNSS, imu: ModuleIMU, drone: Drone):
         self.navigation = NavigationTask(gnss)
         self.controle_moteurs = ControleMoteursTask(drone, imu, self.navigation)
+        # par ordre de priorité: le producteur avant le consommateur,
+        # pour que le contrôle utilise la vitesse la plus récente
+        self.tasks: list[Task] = [self.navigation, self.controle_moteurs]
 
     def next_event_t(self) -> float:
-        return min(self.navigation.next_event_t(), self.controle_moteurs.next_event_t())
+        return min(task.next_event_t() for task in self.tasks)
 
     def step(self):
-        nav_next_t = self.navigation.next_event_t()
-        controle_next_t = self.controle_moteurs.next_event_t()
-        if nav_next_t > controle_next_t:
-            self.controle_moteurs.step()
-        else:
-            self.navigation.step()
+        t = self.next_event_t()
+        task = min(self.tasks, key=lambda task: task.next_event_t())
+        task.step()
+        self.dispatch(t)
+
+    def dispatch(self, t: float):
+        """
+        Si le CPU est libre, le donner à la tâche prête la plus prioritaire
+        """
+        if any(task.status == "calculating" for task in self.tasks):
+            return
+        for task in self.tasks:
+            if task.status == "ready":
+                task.start(t)
+                return

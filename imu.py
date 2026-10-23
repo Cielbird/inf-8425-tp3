@@ -9,4 +9,4 @@ class ModuleIMU:
         pass
 
     def get_accel(self) -> Vector3:
-        return self.drone.accel.copy() # TODO add noise
+        return self.drone.accel_totale.copy() # TODO add noise

@@ -60,7 +60,6 @@ class Vector3:
         return replace(self)
 
     def magnitude(self):
-        print(self.x)
         return math.sqrt(self.x ** 2 + self.y ** 2 + self.z ** 2)
 
     def clamp(self, min_vec: Vector3, max_vec: Vector3):
@@ -146,6 +145,13 @@ def plot_path(t_log: list[float], pos_log: list[Vector3], flight_plan: list[Vect
     ax3d.set_xlabel("x (m)")
     ax3d.set_ylabel("y (m)")
     ax3d.set_zlabel("z (m)")
+    # même échelle sur les 3 axes, sinon un axe presque plat est agrandi
+    all_x, all_y, all_z = xs + plan_xs, ys + plan_ys, zs + plan_zs
+    half_range = max(max(a) - min(a) for a in (all_x, all_y, all_z)) / 2
+    for set_lim, a in ((ax3d.set_xlim, all_x), (ax3d.set_ylim, all_y), (ax3d.set_zlim, all_z)): # type: ignore
+        center = (max(a) + min(a)) / 2
+        set_lim(center - half_range, center + half_range)
+    ax3d.set_box_aspect((1, 1, 1)) # type: ignore
     ax3d.set_title("Trajectoire du drone")
     ax3d.legend()
 
@@ -166,3 +172,24 @@ def plot_path(t_log: list[float], pos_log: list[Vector3], flight_plan: list[Vect
 
     plt.tight_layout()
     plt.show()
+
+def plot_mcu_usage(exec_logs: dict[str, list[tuple[float, float]]], period: float, n_cycles: int = 10):
+    """
+    Chronogramme d'utilisation du MCU: une ligne et une couleur par tâche.
+    N'affiche pas la figure; plt.show() s'en charge.
+    """
+    t_max = n_cycles * period
+    fig, ax = plt.subplots(figsize=(12, 3))
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    for row, (name, log) in enumerate(exec_logs.items()):
+        bars = [(start, dur) for start, dur in log if start < t_max]
+        ax.broken_barh(bars, (row - 0.4, 0.8), facecolors=colors[row % len(colors)], label=name)
+
+    ax.set_yticks(range(len(exec_logs)), list(exec_logs.keys()))
+    ax.set_xlim(0, t_max)
+    ax.set_xlabel("t (s)")
+    ax.set_title(f"Utilisation du MCU ({n_cycles} cycles)")
+    ax.grid(True, axis="x")
+    ax.legend(loc="upper right")
+    fig.tight_layout()
