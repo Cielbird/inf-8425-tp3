@@ -3,7 +3,46 @@ import matplotlib.pyplot as plt
 
 from util import Vector3
 
-def plot_path(t_log: list[float], pos_log: list[Vector3], flight_plan: list[Vector3], fix_3d_log: list[bool]):
+ECART_MAX = 3.0 # écart maximal toléré par rapport au plan de vol (m)
+
+def distance_segment(p: Vector3, a: Vector3, b: Vector3) -> float:
+    """
+    Distance entre le point p et le segment [a, b]
+    """
+    ab = b - a
+    ap = p - a
+    longueur2 = ab.x ** 2 + ab.y ** 2 + ab.z ** 2
+    if longueur2 == 0.0:
+        return ap.magnitude()
+    # projection de p sur la droite (a, b), bornée au segment
+    s = (ap.x * ab.x + ap.y * ab.y + ap.z * ab.z) / longueur2
+    s = min(max(s, 0.0), 1.0)
+    return (ap - ab * s).magnitude()
+
+def ecart_plan(p: Vector3, flight_plan: list[Vector3]) -> float:
+    """
+    Distance entre le point p et le segment le plus proche du plan de vol
+    """
+    return min(distance_segment(p, a, b) for a, b in zip(flight_plan, flight_plan[1:]))
+
+def intervalles(t_log: list[float], masque: list[bool]) -> list[tuple[float, float]]:
+    """
+    Intervalles de temps (début, fin) pendant lesquels le masque est vrai
+    """
+    result: list[tuple[float, float]] = []
+    debut = None
+    for t, m in zip(t_log, masque):
+        if m and debut is None:
+            debut = t
+        elif not m and debut is not None:
+            result.append((debut, t))
+            debut = None
+    if debut is not None:
+        result.append((debut, t_log[-1]))
+    return result
+
+def plot_path(t_log: list[float], pos_log: list[Vector3], flight_plan: list[Vector3], sat_log: list[int]):
+    fix_3d_log = [n >= 4 for n in sat_log]
     xs = [p.x for p in pos_log]
     ys = [p.y for p in pos_log]
     zs = [p.z for p in pos_log]
@@ -33,8 +72,6 @@ def plot_path(t_log: list[float], pos_log: list[Vector3], flight_plan: list[Vect
         ax3d.text(x, y, z, "  " + ", ".join(idxs)) # type: ignore
     ax3d.plot(xs, ys, zs, label="Trajectoire")
     ax3d.plot(lost_xs, lost_ys, lost_zs, c="r", label="Sans fix 3D")
-    ax3d.scatter(xs[0], ys[0], zs[0], c="g", label="Départ") # type: ignore
-    ax3d.scatter(xs[-1], ys[-1], zs[-1], c="r", label="Arrivée") # type: ignore
     ax3d.set_xlabel("x (m)")
     ax3d.set_ylabel("y (m)")
     ax3d.set_zlabel("z (m)")
@@ -49,22 +86,36 @@ def plot_path(t_log: list[float], pos_log: list[Vector3], flight_plan: list[Vect
     ax3d.legend()
     fig3d.tight_layout()
 
-    # Side view (x-z)
-    fig_side, ax2d = plt.subplots(figsize=(7, 5))
-    ax2d.plot(plan_xs, plan_zs, "k:")
-    ax2d.scatter(plan_xs, plan_zs, c="k", marker="X", s=60)
-    for (x, _, z), idxs in checkpoint_labels.items():
-        ax2d.annotate(", ".join(idxs), (x, z), textcoords="offset points", xytext=(6, 6))
-    ax2d.plot(xs, zs)
-    ax2d.plot(lost_xs, lost_zs, c="r")
-    ax2d.scatter(xs[0], zs[0], c="g")
-    ax2d.scatter(xs[-1], zs[-1], c="r")
-    ax2d.set_xlabel("x (m)")
-    ax2d.set_ylabel("z (m)")
-    ax2d.set_title("Vue de côté")
-    ax2d.axis("equal")
-    ax2d.grid(True)
-    fig_side.tight_layout()
+    # Écart par rapport au plan de vol
+    ecarts = [ecart_plan(p, flight_plan) for p in pos_log]
+    fig_ecart, ax_ecart = plt.subplots(figsize=(12, 4))
+
+    # a) périodes de perte du fix GNSS, en fond
+    pertes = [
+        ("3 satelites (fix 2D)", "yellow", [n == 3 for n in sat_log]),
+        ("2 satelites (aucun fix)", "orange", [n < 3 for n in sat_log]),
+    ]
+    for label, couleur, masque in pertes:
+        for i, (debut, fin) in enumerate(intervalles(t_log, masque)):
+            ax_ecart.axvspan(debut, fin, color=couleur, alpha=0.2, label=label if i == 0 else None)
+
+    ax_ecart.plot(t_log, ecarts, label="Écart")
+
+    # b) zones où l'écart dépasse la limite
+    ax_ecart.axhline(ECART_MAX, color="r", linestyle="--", label=f"Limite {ECART_MAX:g} m")
+    ax_ecart.fill_between(
+        t_log, ECART_MAX, ecarts,
+        where=[e > ECART_MAX for e in ecarts], color="r", alpha=0.4, label=f"Écart > {ECART_MAX:g} m",
+    )
+
+    ax_ecart.set_xlabel("t (s)")
+    ax_ecart.set_ylabel("écart (m)")
+    ax_ecart.set_title("Écart par rapport au plan de vol")
+    ax_ecart.set_xlim(t_log[0], t_log[-1])
+    ax_ecart.set_ylim(bottom=0)
+    ax_ecart.grid(True)
+    ax_ecart.legend(loc="upper right")
+    fig_ecart.tight_layout()
 
     plt.show()
 

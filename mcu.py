@@ -83,15 +83,18 @@ class NavigationTask(Task):
         self.gnss = gnss
 
         # task variables
-        self.position = Vector3(0.0, 0.0, 0.0) # latitude, longitude, altitude
+        self.position = Vector3(0.0, 0.0, 0.0) # x, y, z (m)
         self.velocity = Vector3(0.0, 0.0, 0.0) # "shared" memory
 
         self.next_checkpoint_idx = 1
         self.flight_plan = [
             Vector3(0.0, 0.0, 0.0),
-            Vector3(0.0, 20.0, 10.0),
-            Vector3(30.0, -20.0, 10.0),
-            Vector3(30.0, 0.0, 0.0),
+            Vector3(0.0, 0.0, 10.0), # décollage
+            Vector3(40.0, 0.0, 10.0),
+            Vector3(40.0, 0.0, 25.0), # montée
+            Vector3(40.0, 40.0, 25.0),
+            Vector3(0.0, 40.0, 25.0),
+            Vector3(0.0, 40.0, 0.0), # atterrissage
         ]
         self.pid = PID3(0.4, 0.001, 0.0, self.period, -10, 10)
 
@@ -123,7 +126,9 @@ class ControleMoteursTask(Task):
 
         # task variables
         self.vitesse_imu = Vector3(0.0, 0.0, 0.0) # intégrateur après le capteur IMU, avant PID
-        self.pid = PID3(1.0, 0.2, 0.0, self.period, -10, 10)
+        # intégrateur limité à ±2.5 (0.5 m/s² avec i=0.2): assez pour compenser le vent,
+        # sans emballement (windup) pendant les grandes accélérations
+        self.pid = PID3(1.0, 0.2, 0.0, self.period, -2.5, 2.5)
 
     def compute(self):
         # read from shared mem

@@ -1,7 +1,6 @@
 from drone import Drone
-from gnss import ModuleGNSS;
-from imu import ModuleIMU;
 from gnss import ModuleGNSS
+from imu import ModuleIMU
 from mcu import Microcontroleur
 from graph import plot_mcu_usage, plot_path
 from util import Vector3, save_csv
@@ -36,17 +35,30 @@ def main():
     system = System()
 
     # en secondes
-    duration = 60.0
+    duration = 150.0
     elapsed = 0.0
     t_log: list[float] = []
     pos_log: list[Vector3] = []
-    fix_3d_log: list[bool] = []
+    sat_log: list[int] = []
+
+    # pannes GNSS, déclenchées au début d'une étape du plan de vol:
+    # index du point visé -> (nombre de satellites, durée en s)
+    pannes = {
+        3: (3, 5.0), # fix 2D pendant la montée: altitude figée -> écart vertical
+        4: (2, 5.0), # pas de fix en palier: position figée -> écart horizontal
+    }
+    fin_panne = 0.0
+    navigation = system.mcu.navigation
+    etape = navigation.next_checkpoint_idx
 
     while elapsed < duration:
-        # perte du fix 3D (seulement 3 satellites) pendant la montée
-        if 2.0 <= elapsed < 8.0:
-            system.gnss.set_satelites(3)
-        else:
+        if navigation.next_checkpoint_idx != etape:
+            etape = navigation.next_checkpoint_idx
+            if etape in pannes:
+                satelites, duree = pannes[etape]
+                system.gnss.set_satelites(satelites)
+                fin_panne = elapsed + duree
+        if elapsed >= fin_panne:
             system.gnss.set_satelites(4)
 
         next_t = system.next_event_t()
@@ -54,7 +66,7 @@ def main():
         elapsed = next_t
         t_log.append(elapsed)
         pos_log.append(system.drone.position.copy())
-        fix_3d_log.append(system.gnss.satelites >= 4)
+        sat_log.append(system.gnss.satelites)
         print(f"Simulation t={elapsed}")
 
     csv_path = "results.csv"
@@ -70,6 +82,7 @@ def main():
         mcu.navigation.period,
     )
     # plot_path appelle plt.show(), qui affiche aussi la figure du MCU
-    plot_path(t_log, pos_log, mcu.navigation.flight_plan, fix_3d_log)
+    plot_path(t_log, pos_log, mcu.navigation.flight_plan, sat_log)
 
-main()
+if __name__ == "__main__":
+    main()

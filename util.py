@@ -34,13 +34,13 @@ class Vector3:
         )
 
     def __mul__(self, other: Vector3 | float) -> Vector3:
-        if type(other) is Vector3:
+        if isinstance(other, Vector3):
             return Vector3(
                 self.x * other.x,
                 self.y * other.y,
                 self.z * other.z
             )
-        elif type(other) is float:
+        elif isinstance(other, float):
             return Vector3(
                 self.x * other,
                 self.y * other,
@@ -71,7 +71,7 @@ class Vector3:
             self.y = min_vec.y
         elif self.y > max_vec.y:
             self.y = max_vec.y
-            
+
         if self.z < min_vec.z:
             self.z = min_vec.z
         elif self.z > max_vec.z:
@@ -101,7 +101,7 @@ class PID3:
         p = err * self.p
         self._integrator += err * self.dt
         self._integrator.clamp(self.integrator_min, self.integrator_max)
-        i = self._integrator.copy()  * self.i
+        i = self._integrator * self.i
         d = (err - self._old_err) / self.dt * self.d
 
         self._old_err = err.copy()

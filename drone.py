@@ -23,7 +23,7 @@ class Drone:
         # les moteurs suivent la commande avec un retard du premier ordre
         alpha = dt / (self.tau_moteurs + dt)
         self.accel += (self.accel_cmd - self.accel) * alpha
-        
+
         self.accel_totale = self.accel + self.vent
         self.position += self.vitesse * dt + (self.accel_totale/2.0) * (dt ** 2)
         self.vitesse += self.accel_totale * dt
