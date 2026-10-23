@@ -42,17 +42,22 @@ def intervalles(t_log: list[float], masque: list[bool]) -> list[tuple[float, flo
     return result
 
 def plot_path(t_log: list[float], pos_log: list[Vector3], flight_plan: list[Vector3], sat_log: list[int]):
-    fix_3d_log = [n >= 4 for n in sat_log]
     xs = [p.x for p in pos_log]
     ys = [p.y for p in pos_log]
     zs = [p.z for p in pos_log]
 
-    # portions sans fix 3D, NaN ailleurs pour couper la ligne;
-    # on garde aussi le point qui suit pour que le segment rouge soit continu
-    lost = [not fix or (i > 0 and not fix_3d_log[i - 1]) for i, fix in enumerate(fix_3d_log)]
-    lost_xs = [x if l else math.nan for x, l in zip(xs, lost)]
-    lost_ys = [y if l else math.nan for y, l in zip(ys, lost)]
-    lost_zs = [z if l else math.nan for z, l in zip(zs, lost)]
+    def portions(masque: list[bool]) -> tuple[list[float], list[float], list[float]]:
+        # garde les points où le masque est vrai, NaN ailleurs pour couper la ligne;
+        # on garde aussi le point qui suit pour que la portion soit continue
+        garde = [m or (i > 0 and masque[i - 1]) for i, m in enumerate(masque)]
+        return (
+            [x if g else math.nan for x, g in zip(xs, garde)],
+            [y if g else math.nan for y, g in zip(ys, garde)],
+            [z if g else math.nan for z, g in zip(zs, garde)],
+        )
+
+    fix_2d_xs, fix_2d_ys, fix_2d_zs = portions([n == 3 for n in sat_log])
+    lost_xs, lost_ys, lost_zs = portions([n < 3 for n in sat_log])
 
     plan_xs = [p.x for p in flight_plan]
     plan_ys = [p.y for p in flight_plan]
@@ -71,7 +76,8 @@ def plot_path(t_log: list[float], pos_log: list[Vector3], flight_plan: list[Vect
     for (x, y, z), idxs in checkpoint_labels.items():
         ax3d.text(x, y, z, "  " + ", ".join(idxs)) # type: ignore
     ax3d.plot(xs, ys, zs, label="Trajectoire")
-    ax3d.plot(lost_xs, lost_ys, lost_zs, c="r", label="Sans fix 3D")
+    ax3d.plot(fix_2d_xs, fix_2d_ys, fix_2d_zs, c="orange", label="Fix 2D (3 satelites)")
+    ax3d.plot(lost_xs, lost_ys, lost_zs, c="r", label="Aucun fix (<3 satelites)")
     ax3d.set_xlabel("x (m)")
     ax3d.set_ylabel("y (m)")
     ax3d.set_zlabel("z (m)")
@@ -93,7 +99,7 @@ def plot_path(t_log: list[float], pos_log: list[Vector3], flight_plan: list[Vect
     # a) périodes de perte du fix GNSS, en fond
     pertes = [
         ("3 satelites (fix 2D)", "yellow", [n == 3 for n in sat_log]),
-        ("2 satelites (aucun fix)", "orange", [n < 3 for n in sat_log]),
+        ("<3 satelites (aucun fix)", "orange", [n < 3 for n in sat_log]),
     ]
     for label, couleur, masque in pertes:
         for i, (debut, fin) in enumerate(intervalles(t_log, masque)):

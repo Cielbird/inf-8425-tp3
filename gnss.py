@@ -28,4 +28,5 @@ class ModuleGNSS:
         elif self.satelites == 3:
             # fix 2D: le récepteur suppose que l'altitude n'a pas changé
             self.derniere_position = Vector3(position.x, position.y, self.derniere_position.z)
+        # aucun fix: utilise dernière position
         return self.derniere_position.copy()

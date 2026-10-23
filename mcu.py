@@ -74,12 +74,13 @@ class Task:
 
 class NavigationTask(Task):
     """
-    20Hz:
-    Read from GNSS module with UART, calculate necessary velocity, then write value to shared memory
+    5Hz:
+    Lire la position (GNSS via UART), calculer la vitesse nécessaire, et écrire en mémoire partagée.
+    Les calculs sont fixés à prendre 5ms.
     """
 
     def __init__(self, gnss: ModuleGNSS):
-        super().__init__(period=0.05, processing_dt=0.005) # 20Hz
+        super().__init__(period=0.2, processing_dt=0.005) # 5ms @ 5Hz
         self.gnss = gnss
 
         # task variables
@@ -97,6 +98,7 @@ class NavigationTask(Task):
             Vector3(0.0, 40.0, 0.0), # atterrissage
         ]
         self.pid = PID3(0.4, 0.001, 0.0, self.period, -10, 10)
+        self.arrival_dist = 0.3
 
     def compute(self):
         # read from GNSS
@@ -106,7 +108,7 @@ class NavigationTask(Task):
 
     def calculate_vel(self) -> Vector3:
         target = self.flight_plan[self.next_checkpoint_idx]
-        if (target - self.position).magnitude() < 0.1:
+        if (target - self.position).magnitude() < self.arrival_dist:
             if self.next_checkpoint_idx < len(self.flight_plan) - 1:
                 self.next_checkpoint_idx += 1
         return self.pid(self.position, target)
@@ -114,21 +116,22 @@ class NavigationTask(Task):
 
 class ControleMoteursTask(Task):
     """
-    20Hz:
-    Read the navigation velocity from shared memory and the IMU, then command the motors
+    5Hz:
+    Lire la vitesse (IMU via I2C), calculer l'acceleration nécessaire, et envoyer commande aux 
+    moteurs (PWM).
+    Les calculs sont fixés à prendre 5ms.
     """
 
     def __init__(self, drone: Drone, imu: ModuleIMU, nav_task: NavigationTask):
-        super().__init__(period=0.05, processing_dt=0.005) # 20Hz
+        super().__init__(period=0.2, processing_dt=0.005) # 5ms @ 5Hz
         self.drone = drone
         self.imu = imu
         self.nav_task = nav_task
 
         # task variables
         self.vitesse_imu = Vector3(0.0, 0.0, 0.0) # intégrateur après le capteur IMU, avant PID
-        # intégrateur limité à ±2.5 (0.5 m/s² avec i=0.2): assez pour compenser le vent,
-        # sans emballement (windup) pendant les grandes accélérations
-        self.pid = PID3(1.0, 0.2, 0.0, self.period, -2.5, 2.5)
+        # sortie en force (N)
+        self.pid = PID3(1.5, 0.3, 0.0, self.period, -2.5, 2.5)
 
     def compute(self):
         # read from shared mem
@@ -136,10 +139,10 @@ class ControleMoteursTask(Task):
 
         accel_imu = self.imu.get_accel()
         self.vitesse_imu += accel_imu * self.period
-        accel = self.pid(self.vitesse_imu, vel)
+        force = self.pid(self.vitesse_imu, vel)
 
         # write to motors
-        self.drone.set_accel(accel)
+        self.drone.set_force(force)
 
 
 class Microcontroleur:

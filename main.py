@@ -35,31 +35,31 @@ def main():
     system = System()
 
     # en secondes
-    duration = 150.0
+    duration = 80.0
     elapsed = 0.0
     t_log: list[float] = []
     pos_log: list[Vector3] = []
     sat_log: list[int] = []
 
-    # pannes GNSS, déclenchées au début d'une étape du plan de vol:
-    # index du point visé -> (nombre de satellites, durée en s)
-    pannes = {
-        3: (3, 5.0), # fix 2D pendant la montée: altitude figée -> écart vertical
-        4: (2, 5.0), # pas de fix en palier: position figée -> écart horizontal
-    }
-    fin_panne = 0.0
+    # pannes GNSS: (début, fin, nombre de satellites), en s
+    pannes = [
+        (15.0, 20.0, 3), # fix 2D pendant la montée: altitude figée -> écart vertical
+        (45.0, 50.0, 1), # pas de fix en palier: position figée -> écart horizontal
+        (35.0, 40.0, 2), # pas de fix en palier: position figée -> écart horizontal
+    ]
     navigation = system.mcu.navigation
     etape = navigation.next_checkpoint_idx
 
     while elapsed < duration:
+        satelites = 4
+        for debut, fin, n in pannes:
+            if debut <= elapsed < fin:
+                satelites = n
+        system.gnss.set_satelites(satelites)
+
         if navigation.next_checkpoint_idx != etape:
             etape = navigation.next_checkpoint_idx
-            if etape in pannes:
-                satelites, duree = pannes[etape]
-                system.gnss.set_satelites(satelites)
-                fin_panne = elapsed + duree
-        if elapsed >= fin_panne:
-            system.gnss.set_satelites(4)
+            print(f"Étape {etape} à t={elapsed:.2f}")
 
         next_t = system.next_event_t()
         system.step()
