@@ -1,6 +1,7 @@
 from drone import Drone
 from gnss import ModuleGNSS
 from imu import ModuleIMU
+from util import PID3, Vector3
 
 
 class NavigationTask:
@@ -13,14 +14,23 @@ class NavigationTask:
         self.gnss = gnss
         self.period = 0.05 # 5Hz frequency
         # read and writing times are negligible
-        self.processing_dt = 0.05 # calculating time in seconds
+        self.processing_dt = 0.005 # calculating time in seconds
         self.status = "waiting" # in {"waiting", "calculating"}
         self.elapsed = 0.0
 
         # task variables
-        self.position = (0.0, 0.0, 0.0) # latitude, longitude, altitude
-        self.velocity = (0.0, 0.0, 0.0) # "shared" memory
-        pass
+        self.position = Vector3(0.0, 0.0, 0.0) # latitude, longitude, altitude
+        self.velocity = Vector3(0.0, 0.0, 0.0) # "shared" memory
+
+        self.next_checkpoint_idx = 1
+        self.flight_plan = [
+            Vector3(0.0, 0.0, 0.0),
+            Vector3(30.0, 0.0, 0.0),
+            Vector3(0.0, 30.0, 0.0),
+            Vector3(-30.0, 0.0, 0.0),
+            Vector3(0.0, -30.0, 0.0),
+            Vector3(0.0, 0.0, 0.0),
+        ]
 
 
     def next_event_t(self) -> float:
@@ -45,6 +55,8 @@ class NavigationTask:
                 # wait until next calc
                 self.elapsed = next_t
 
+                self.status = "calculating"
+
             case "calculating":
                 # read from GNSS
                 self.position = self.gnss.get_position()
@@ -52,13 +64,18 @@ class NavigationTask:
                 self.elapsed = next_t
                 # write to shared mem
                 self.velocity = self.calculate_vel()
+                self.status = "waiting"
 
             case _:
                 raise TypeError("Invalid status")
 
-    def calculate_vel(self) -> tuple[float, float, float]:
-        return (1.0, 1.0, 1.0)
-            
+    def calculate_vel(self) -> Vector3:
+        err = self.flight_plan[self.next_checkpoint_idx] - self.gnss.get_position()
+        if err.magnitude() < 0.1:
+            if self.next_checkpoint_idx < len(self.flight_plan) - 1:
+                self.next_checkpoint_idx += 1
+        p = 0.0005
+        return err / self.period * p
 
 
 class ControleMoteursTask:
@@ -68,13 +85,13 @@ class ControleMoteursTask:
         self.nav_task = nav_task
         self.period = 0.05 # 5Hz frequency
         # read and writing times are negligible
-        self.processing_dt = 0.05 # calculating time in seconds
+        self.processing_dt = 0.005 # calculating time in seconds
         self.status = "waiting" # in {"waiting", "calculating"}
         self.elapsed = 0.0
 
         # task variables
-        self.acceleration = (0.0, 0.0, 0.0) # latitude, longitude, altitude TODO
-        pass
+        self.vitesse_imu = Vector3(0.0, 0.0, 0.0) # intégrateur après le capteur IMU, avant PID
+        self.pid = PID3(0.05, 0.0, 0.0, self.period, -10, 10)
 
 
     def next_event_t(self) -> float:
@@ -97,24 +114,23 @@ class ControleMoteursTask:
             case "waiting":
                 # wait until next calc
                 self.elapsed = next_t
+                self.status = "calculating"
 
             case "calculating":
                 # read from GNSS
                 vel = self.nav_task.velocity
 
-                accel = self.calculate_consigne(vel)
+                accel_imu = self.imu.get_accel()
+                self.vitesse_imu += accel_imu * self.period
+                accel = self.pid(self.vitesse_imu, vel)
 
                 # calculation time
                 self.elapsed = next_t
                 # write to shared mem
-                self.drone.set_consigne(accel) # TODO
+                self.drone.set_accel(accel)
+                self.status = "waiting"
                 
             case _: raise TypeError("invalid control moteurs task state")
-
-    def calculate_consigne(self, vel: tuple[float, float, float]) -> tuple[float, float, float]:
-        _accel = self.imu.get_accel()
-        # TODO PID
-        return (0.0, 0.0, 0.0)
 
 class Microcontroleur:
     """
@@ -123,12 +139,12 @@ class Microcontroleur:
     navigation: NavigationTask
     controle_moteurs: ControleMoteursTask
     
-    def __init__(self, gnss: ModuleGNSS, drone: Drone):
+    def __init__(self, gnss: ModuleGNSS, imu: ModuleIMU, drone: Drone):
         self.navigation = NavigationTask(gnss)
-        self.controle_moteurs = ControleMoteursTask(drone, self.navigation)
+        self.controle_moteurs = ControleMoteursTask(drone, imu, self.navigation)
 
     def next_event_t(self) -> float:
-        min(self.navigation.next_event_t(), self.controle_moteurs.next_event_t())
+        return min(self.navigation.next_event_t(), self.controle_moteurs.next_event_t())
 
     def step(self):
         nav_next_t = self.navigation.next_event_t()

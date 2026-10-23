@@ -1,3 +1,4 @@
+from util import Vector3
 
 from drone import Drone
 
@@ -10,6 +11,5 @@ class ModuleGNSS:
     def run(self, dt: float):
         pass
 
-    def get_position(self) -> tuple[float, float, float]:
+    def get_position(self) -> Vector3:
         return self.drone.get_position() # TODO add errors depending on satelite
-

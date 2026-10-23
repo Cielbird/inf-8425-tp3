@@ -4,30 +4,24 @@ from drone import Drone
 from gnss import ModuleGNSS;
 from imu import ModuleIMU;
 from gnss import ModuleGNSS
-from mcu import Microcontroleur;
-
-@dataclass
-class SimStatus:
-    pass
-
-class Alimentation:
-    def __init__(self):
-        pass
+from mcu import Microcontroleur
+from util import Vector3, plot_path, save_csv;
 
 class System:
     def __init__(self):
-        self.gnss = ModuleGNSS()
-        self.imu = ModuleIMU()
         self.drone = Drone()
-        self.mcu = Microcontroleur(self.gnss, self.drone)
+        self.gnss = ModuleGNSS(self.drone)
+        self.imu = ModuleIMU(self.drone)
+        self.mcu = Microcontroleur(self.gnss, self.imu, self.drone)
+        self.t = 0.0
 
     def next_event_t(self) -> float:
         return self.mcu.next_event_t()
 
     def step(self):
-        print("Simulation en cours... TODO")
-
-        dt = self.mcu.next_event_t()
+        next_t = self.mcu.next_event_t()
+        dt = next_t - self.t
+        self.t = next_t
 
         # continuous time sim blocks
         self.gnss.run(dt)
@@ -43,21 +37,23 @@ def main():
     system = System()
 
     # en secondes
-    duration = 1.0
+    duration = 2500.0
     elapsed = 0.0
-    
-    log = []
+    t_log: list[float] = []
+    pos_log: list[Vector3] = []
 
-    while (elapsed < duration):
+    while elapsed < duration:
         next_t = system.next_event_t()
-        stat = system.step()
+        system.step()
         elapsed = next_t
-        log.append(stat)
+        t_log.append(elapsed)
+        pos_log.append(system.drone.position.copy())
+        print(f"Simulation t={elapsed}")
 
-    # save `log` to csv
-    print("Simulation terminée, résultats dans: TODO.csv")
+    csv_path = "results.csv"
+    save_csv(csv_path, t_log, pos_log)
+    print(f"Simulation terminée, résultats dans: {csv_path}")
 
+    plot_path(t_log, pos_log, system.mcu.navigation.flight_plan)
 
-
-if __name__ == "__main__":
-    main()
+main()
