@@ -25,8 +25,8 @@ class System:
 
         # continuous time sim blocks
         self.gnss.run(dt)
-        self.imu.run(dt)
         self.drone.run(dt)
+        self.imu.run(dt) # après le drone: mesure l'accélération de ce pas
 
         # discrete time sim block
         self.mcu.step()

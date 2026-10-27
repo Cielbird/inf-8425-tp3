@@ -105,6 +105,7 @@ class NavigationTask(Task):
         # navigation à l'estime (dead reckoning)
         self.vitesse_estimee = Vector3(0.0, 0.0, 0.0)
         self.position_gnss = Vector3(0.0, 0.0, 0.0) # dernière position GNSS lue
+        self.t_lecture = 0.0 # instant de la dernière lecture des capteurs
         self.fix = "3D" # in {"3D", "2D", "aucun"}
         self.event_log: list[tuple[float, str]] = [] # (t, nouveau fix) à chaque changement détecté
         self.nb_mises_a_jour = 0 # incrémenté à chaque nouvelle estimation, "shared" memory
@@ -118,7 +119,11 @@ class NavigationTask(Task):
         # read from GNSS and IMU
         satelites = self.gnss.get_satelites()
         position_gnss = self.gnss.get_position()
-        accel = self.imu.get_accel()
+        delta_v = self.imu.get_delta_v()
+        # temps écoulé depuis la dernière lecture, mesuré par l'horloge du MCU
+        t = self.start_t + self.processing_dt
+        dt = t - self.t_lecture
+        self.t_lecture = t
 
         # détection de la perte / du retour du fix
         fix = "3D" if satelites >= 4 else "2D" if satelites == 3 else "aucun"
@@ -127,15 +132,17 @@ class NavigationTask(Task):
             self.event_log.append((self.start_t, fix))
             self.fix = fix
 
-        # estime: intégration de l'accélération IMU depuis la dernière position
-        estime = self.position + self.vitesse_estimee * self.period + accel * (self.period ** 2 / 2)
-        self.vitesse_estimee += accel * self.period
+        # estime: intégration du delta-v de l'IMU depuis la dernière position
+        # (vitesse moyenne sur l'intervalle: exacte si l'accélération y est constante)
+        estime = self.position + (self.vitesse_estimee + delta_v / 2) * dt
+        self.vitesse_estimee += delta_v
 
         match fix:
             case "3D":
                 if fix_precedent == "3D":
-                    # recale la vitesse sur deux positions GNSS consécutives
-                    self.vitesse_estimee = (position_gnss - self.position_gnss) / self.period
+                    # recale la vitesse sur deux positions GNSS consécutives: leur différence donne
+                    # la vitesse moyenne, en milieu d'intervalle; + delta_v / 2 pour la vitesse actuelle
+                    self.vitesse_estimee = (position_gnss - self.position_gnss) / dt + delta_v / 2
                 self.position = position_gnss
             case "2D":
                 # x, y du GNSS, altitude figée par le récepteur: z à l'estime
