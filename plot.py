@@ -125,23 +125,74 @@ def plot_path(t_log: list[float], pos_log: list[Vector3], flight_plan: list[Vect
 
     plt.show()
 
-def plot_mcu_usage(exec_logs: dict[str, list[tuple[float, float]]], period: float, n_cycles: int = 10):
+def plot_mcu_usage(exec_logs: dict[str, list[tuple[float, float]]], period: float,
+                   navigation_log: list[tuple[float, float]], events: list[tuple[float, str]],
+                   pannes: list[tuple[float, float, int]], t_debut: float = 0.0, n_cycles: int = 10):
     """
-    Chronogramme d'utilisation du MCU: une ligne et une couleur par tâche.
-    N'affiche pas la figure; plt.show() s'en charge.
+    Chronogramme d'utilisation du MCU: une ligne et une couleur par tâche,
+    avec les pannes GNSS, les détections de changement de fix et les exécutions de remédiation
+    de la navigation. N'affiche pas la figure; plt.show() s'en charge.
     """
-    t_max = n_cycles * period
-    fig, ax = plt.subplots(figsize=(12, 3))
+    t_fin = t_debut + n_cycles * period
+    fig, ax = plt.subplots(figsize=(12, 4))
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
+    # remédiation: exécutions de la navigation entre la détection d'une perte de fix
+    # et le retour du fix 3D
+    remediations = {
+        "2D": ("Remédiation", "yellow"),
+        "aucun": ("Remédiation", "orange"),
+    }
+    deja_affiche: set[str] = set()
+    for start, dur in navigation_log:
+        if not t_debut <= start < t_fin:
+            continue
+        # fix détecté au moment de cette exécution: dernier événement avant elle
+        fix = "3D"
+        for t, f in events:
+            if t <= start:
+                fix = f
+        if fix in remediations:
+            label, couleur = remediations[fix]
+            ax.axvspan(start, start + dur, color=couleur, alpha=0.5, label=label if fix not in deja_affiche else None)
+            deja_affiche.add(fix)
+
     for row, (name, log) in enumerate(exec_logs.items()):
-        bars = [(start, dur) for start, dur in log if start < t_max]
+        bars = [(start, dur) for start, dur in log if t_debut <= start < t_fin]
         ax.broken_barh(bars, (row - 0.4, 0.8), facecolors=colors[row % len(colors)], label=name)
 
+    # événements: même style pour tous, seule la couleur change
+    # (la ligne d'axvline va de y=0 à y=1, markevery=[1] ne garde que le marqueur du haut)
+    def evenement(t: float, couleur: str, label: str):
+        ax.axvline(t, color=couleur, linewidth=2, marker="v", markersize=8,
+                   markevery=[1], clip_on=False, label=label)
+
+    # pannes GNSS réelles (perte des satellites), avant leur détection
+    for debut, fin, n in pannes:
+        if t_debut <= debut < t_fin:
+            evenement(debut, "k", f"Panne")
+        if t_debut <= fin < t_fin:
+            evenement(fin, "gray", "Fin de panne")
+
+    # détections par la tâche de navigation
+    detections = {
+        "2D": ("Détection: fix 2D", "darkorange"),
+        "aucun": ("Détection: perte du fix", "red"),
+        "3D": ("Détection: fix 3D retrouvé", "green"),
+    }
+    for t, fix in events:
+        if t_debut <= t < t_fin:
+            label, couleur = detections[fix]
+            evenement(t, couleur, label)
+
     ax.set_yticks(range(len(exec_logs)), list(exec_logs.keys()))
-    ax.set_xlim(0, t_max)
+    ax.set_xlim(t_debut, t_fin)
     ax.set_xlabel("t (s)")
-    ax.set_title(f"Utilisation du MCU ({n_cycles} cycles)")
+    ax.set_title(f"Utilisation du MCU \n")
     ax.grid(True, axis="x")
-    ax.legend(loc="upper right")
+    # deux légendes, à droite du graphe: les tâches, puis les événements et la remédiation
+    handles, labels = ax.get_legend_handles_labels()
+    evenements = [(h, l) for h, l in zip(handles, labels) if l not in exec_logs]
+    if evenements:
+        ax.legend(*zip(*evenements), title="Événements", loc="upper left", bbox_to_anchor=(1.01, 1))
     fig.tight_layout()

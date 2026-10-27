@@ -18,11 +18,15 @@ class ModuleGNSS:
     def set_satelites(self, n: int):
         self.satelites = n
 
+    def get_satelites(self) -> int:
+        # nombre de satellites utilisés, transmis par le récepteur (trame NMEA GGA)
+        return self.satelites
+
     def run(self, dt: float):
         pass
 
     def get_position(self) -> Vector3:
-        position = self.drone.get_position().copy() # TODO add errors depending on satelite
+        position = self.drone.get_position().copy()
         if self.satelites >= 4:
             self.derniere_position = position
         elif self.satelites == 3:

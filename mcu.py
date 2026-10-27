@@ -1,7 +1,23 @@
+from dataclasses import dataclass
+
 from drone import Drone
 from gnss import ModuleGNSS
 from imu import ModuleIMU
 from util import PID3, Vector3
+
+
+@dataclass
+class TaskConfig:
+    """
+    Paramètres d'une tâche périodique
+    """
+    frequence: float # Hz
+    processing_dt: float # durée du calcul (s)
+    pid: tuple[float, float, float] # (p, i, d)
+    integrateur_max: float # intégrateur du PID limité à ±integrateur_max
+
+    def make_pid(self) -> PID3:
+        return PID3(*self.pid, 1.0 / self.frequence, -self.integrateur_max, self.integrateur_max)
 
 
 class Task:
@@ -74,37 +90,63 @@ class Task:
 
 class NavigationTask(Task):
     """
-    5Hz:
     Lire la position (GNSS via UART), calculer la vitesse nécessaire, et écrire en mémoire partagée.
-    Les calculs sont fixés à prendre 5ms.
     """
 
-    def __init__(self, gnss: ModuleGNSS):
-        super().__init__(period=0.2, processing_dt=0.005) # 5ms @ 5Hz
+    def __init__(self, gnss: ModuleGNSS, imu: ModuleIMU, flight_plan: list[Vector3], config: TaskConfig):
+        super().__init__(period=1.0 / config.frequence, processing_dt=config.processing_dt)
         self.gnss = gnss
+        self.imu = imu
 
         # task variables
-        self.position = Vector3(0.0, 0.0, 0.0) # x, y, z (m)
+        self.position = Vector3(0.0, 0.0, 0.0) # position estimée x, y, z (m)
         self.velocity = Vector3(0.0, 0.0, 0.0) # "shared" memory
 
+        # navigation à l'estime (dead reckoning)
+        self.vitesse_estimee = Vector3(0.0, 0.0, 0.0)
+        self.position_gnss = Vector3(0.0, 0.0, 0.0) # dernière position GNSS lue
+        self.fix = "3D" # in {"3D", "2D", "aucun"}
+        self.event_log: list[tuple[float, str]] = [] # (t, nouveau fix) à chaque changement détecté
+        self.nb_mises_a_jour = 0 # incrémenté à chaque nouvelle estimation, "shared" memory
+
         self.next_checkpoint_idx = 1
-        self.flight_plan = [
-            Vector3(0.0, 0.0, 0.0),
-            Vector3(0.0, 0.0, 10.0), # décollage
-            Vector3(40.0, 0.0, 10.0),
-            Vector3(40.0, 0.0, 25.0), # montée
-            Vector3(40.0, 40.0, 25.0),
-            Vector3(0.0, 40.0, 25.0),
-            Vector3(0.0, 40.0, 0.0), # atterrissage
-        ]
-        self.pid = PID3(0.4, 0.001, 0.0, self.period, -10, 10)
+        self.flight_plan = flight_plan
+        self.pid = config.make_pid()
         self.arrival_dist = 0.3
 
     def compute(self):
-        # read from GNSS
-        self.position = self.gnss.get_position()
+        # read from GNSS and IMU
+        satelites = self.gnss.get_satelites()
+        position_gnss = self.gnss.get_position()
+        accel = self.imu.get_accel()
+
+        # détection de la perte / du retour du fix
+        fix = "3D" if satelites >= 4 else "2D" if satelites == 3 else "aucun"
+        fix_precedent = self.fix
+        if fix != self.fix:
+            self.event_log.append((self.start_t, fix))
+            self.fix = fix
+
+        # estime: intégration de l'accélération IMU depuis la dernière position
+        estime = self.position + self.vitesse_estimee * self.period + accel * (self.period ** 2 / 2)
+        self.vitesse_estimee += accel * self.period
+
+        match fix:
+            case "3D":
+                if fix_precedent == "3D":
+                    # recale la vitesse sur deux positions GNSS consécutives
+                    self.vitesse_estimee = (position_gnss - self.position_gnss) / self.period
+                self.position = position_gnss
+            case "2D":
+                # x, y du GNSS, altitude figée par le récepteur: z à l'estime
+                self.position = Vector3(position_gnss.x, position_gnss.y, estime.z)
+            case _:
+                self.position = estime
+        self.position_gnss = position_gnss
+
         # write to shared mem
         self.velocity = self.calculate_vel()
+        self.nb_mises_a_jour += 1
 
     def calculate_vel(self) -> Vector3:
         target = self.flight_plan[self.next_checkpoint_idx]
@@ -116,29 +158,33 @@ class NavigationTask(Task):
 
 class ControleMoteursTask(Task):
     """
-    5Hz:
-    Lire la vitesse (IMU via I2C), calculer l'acceleration nécessaire, et envoyer commande aux 
+    Lire la vitesse (IMU via I2C), calculer la force nécessaire, et envoyer commande aux
     moteurs (PWM).
-    Les calculs sont fixés à prendre 5ms.
     """
 
-    def __init__(self, drone: Drone, imu: ModuleIMU, nav_task: NavigationTask):
-        super().__init__(period=0.2, processing_dt=0.005) # 5ms @ 5Hz
+    def __init__(self, drone: Drone, imu: ModuleIMU, nav_task: NavigationTask, config: TaskConfig):
+        super().__init__(period=1.0 / config.frequence, processing_dt=config.processing_dt)
         self.drone = drone
         self.imu = imu
         self.nav_task = nav_task
 
         # task variables
         self.vitesse_imu = Vector3(0.0, 0.0, 0.0) # intégrateur après le capteur IMU, avant PID
-        # sortie en force (N)
-        self.pid = PID3(1.5, 0.3, 0.0, self.period, -2.5, 2.5)
+        self.nav_vue = 0 # dernière estimation de la navigation utilisée
+        self.pid = config.make_pid() # sortie en force (N)
 
     def compute(self):
         # read from shared mem
         vel = self.nav_task.velocity
 
         accel_imu = self.imu.get_accel()
-        self.vitesse_imu += accel_imu * self.period
+        if self.nav_task.nb_mises_a_jour != self.nav_vue:
+            # nouvelle estimation de la navigation (recalée sur le GNSS si fix 3D):
+            # remplace l'intégration IMU pour éviter la dérive
+            self.nav_vue = self.nav_task.nb_mises_a_jour
+            self.vitesse_imu = self.nav_task.vitesse_estimee.copy()
+        else:
+            self.vitesse_imu += accel_imu * self.period
         force = self.pid(self.vitesse_imu, vel)
 
         # write to motors
@@ -153,9 +199,10 @@ class Microcontroleur:
     navigation: NavigationTask
     controle_moteurs: ControleMoteursTask
 
-    def __init__(self, gnss: ModuleGNSS, imu: ModuleIMU, drone: Drone):
-        self.navigation = NavigationTask(gnss)
-        self.controle_moteurs = ControleMoteursTask(drone, imu, self.navigation)
+    def __init__(self, gnss: ModuleGNSS, imu: ModuleIMU, drone: Drone, flight_plan: list[Vector3],
+                 navigation_config: TaskConfig, controle_config: TaskConfig):
+        self.navigation = NavigationTask(gnss, imu, flight_plan, navigation_config)
+        self.controle_moteurs = ControleMoteursTask(drone, imu, self.navigation, controle_config)
         # par ordre de priorité: le producteur avant le consommateur,
         # pour que le contrôle utilise la vitesse la plus récente
         self.tasks: list[Task] = [self.navigation, self.controle_moteurs]
